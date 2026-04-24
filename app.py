@@ -2,7 +2,6 @@ import streamlit as st
 import sqlite3
 from sqlite3 import Error
 import pandas as pd
-import plotly.express as px
 from datetime import datetime
 import hashlib
 import re
@@ -13,12 +12,6 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import random
 import string
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
-from sentence_transformers import SentenceTransformer
-from src.data_utils import extract_text_from_file, preprocess_text
-from src.modeling import compute_weighted_score, apply_min_max_scaling
-from streamlit.runtime.secrets import StreamlitSecretNotFoundError
 
 # --- Page Config ---
 st.set_page_config(
@@ -28,49 +21,11 @@ st.set_page_config(
 )
 
 # --- Load Secrets & Config ---
-try:
-    SMTP_USERNAME = st.secrets["SMTP_USERNAME"]
-    SMTP_PASSWORD = st.secrets["SMTP_PASSWORD"]
-    SMTP_SERVER = st.secrets.get("SMTP_SERVER", "smtp.gmail.com")
-    SMTP_PORT = int(st.secrets.get("SMTP_PORT", 587))
-    ADMIN_SECRET_KEY = st.secrets.get("ADMIN_SECRET_KEY", "Mekdela@2026")
-except (KeyError, StreamlitSecretNotFoundError):
-    SMTP_USERNAME = os.environ.get("SMTP_USERNAME", "")
-    SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
-    SMTP_SERVER = os.environ.get("SMTP_SERVER", "smtp.gmail.com")
-    SMTP_PORT = int(os.environ.get("SMTP_PORT", 587))
-    ADMIN_SECRET_KEY = "Mekdela@2026"
-
-# --- CSS Styles ---
-CUSTOM_CSS = """
-<style>
-    .header {
-        background-color: #006400;
-        color: white;
-        padding: 20px;
-        text-align: center;
-        font-size: 24px;
-        font-weight: bold;
-        width: 100%;
-        position: sticky;
-        top: 0;
-        z-index: 2000;
-        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-    }
-    .main-content { padding-top: 20px; padding-bottom: 60px; }
-    .card {
-        background-color: white;
-        border: 1px solid #e6e9ef;
-        border-radius: 15px;
-        padding: 20px;
-        margin-bottom: 20px;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.05);
-    }
-    .badge { display: inline-block; padding: 5px 10px; border-radius: 20px; font-weight: bold; }
-    .badge-accepted { background-color: #28a745; color: white; }
-    .badge-processing { background-color: #007bff; color: white; }
-</style>
-"""
+ADMIN_SECRET_KEY = st.secrets.get("ADMIN_SECRET_KEY", "Mekdela@2026")
+SMTP_USERNAME = st.secrets.get("SMTP_USERNAME", "")
+SMTP_PASSWORD = st.secrets.get("SMTP_PASSWORD", "")
+SMTP_SERVER = "smtp.gmail.com"
+SMTP_PORT = 587
 
 # --- Database Functions ---
 def get_sqlite_connection():
@@ -79,8 +34,6 @@ def get_sqlite_connection():
 def init_db():
     conn = get_sqlite_connection()
     cursor = conn.cursor()
-    cursor.execute("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, full_name TEXT, email TEXT UNIQUE, phone TEXT, password TEXT, role TEXT)")
-    cursor.execute("CREATE TABLE IF NOT EXISTS all_submissions (id INTEGER PRIMARY KEY AUTOINCREMENT, full_name TEXT, email TEXT UNIQUE, resume_text TEXT, tf_idf_score REAL, transformer_score REAL, final_score REAL, upload_time DATETIME)")
     cursor.execute("CREATE TABLE IF NOT EXISTS invitation_codes (email TEXT PRIMARY KEY, code TEXT, created_at DATETIME)")
     conn.commit()
     conn.close()
@@ -89,15 +42,15 @@ def init_db():
 def generate_access_code():
     return ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
 
-def hash_password(password):
-    return hashlib.sha256(password.encode()).hexdigest()
-
 def validate_email(email):
     return re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', email) is not None
 
 def send_access_code_email(recipient, code):
-    msg = MIMEMultipart(); msg["Subject"] = "Access Code"; msg["From"] = SMTP_USERNAME; msg["To"] = recipient
-    msg.attach(MIMEText(f"Your access code is: {code}", "plain"))
+    msg = MIMEMultipart()
+    msg["Subject"] = "Your Verification Code"
+    msg["From"] = SMTP_USERNAME
+    msg["To"] = recipient
+    msg.attach(MIMEText(f"Your verification code is: {code}", "plain"))
     try:
         context = ssl.create_default_context()
         with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
@@ -111,77 +64,87 @@ def send_access_code_email(recipient, code):
 # --- UI Components ---
 def main():
     init_db()
-    st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
-    st.markdown('<div class="header">Resume Screening System</div>', unsafe_allow_html=True)
-
+    
     # Session State Initialization
-    if "user" not in st.session_state: st.session_state["user"] = None
-    if "verification_step" not in st.session_state: st.session_state["verification_step"] = "select_role"
-    if "verification_email" not in st.session_state: st.session_state["verification_email"] = ""
+    if "verification_step" not in st.session_state:
+        st.session_state["verification_step"] = "select_role"
+    if "verification_email" not in st.session_state:
+        st.session_state["verification_email"] = ""
 
-    if st.session_state["user"] is None:
-        outer_col1, outer_col2, outer_col3 = st.columns([1, 2, 1])
-        with outer_col2:
-            tab1, tab2 = st.tabs(["🔐 Login", "📝 Register"])
-            
-            with tab1:
-                st.subheader("Login")
-                l_email = st.text_input("Email", key="l_email")
-                l_pass = st.text_input("Password", type="password", key="l_pass")
-                if st.button("Login"):
-                    # Simple Login Logic (In real app, query DB)
-                    st.success("Login logic would go here.")
+    st.title("📄 Resume Screening System")
 
-            with tab2:
-                role = st.radio("Register as:", ["Candidate", "Recruiter"])
+    tab1, tab2 = st.tabs(["🔐 Login", "📝 Register"])
+
+    with tab2:
+        role = st.radio("Register as:", ["Candidate", "Recruiter"], key="role_selector")
+        
+        if role == "Recruiter":
+            # --- STEP 1: ADMIN KEY & EMAIL ---
+            if st.session_state["verification_step"] == "select_role":
+                st.subheader("Step 1: Admin Verification")
                 
-                if role == "Candidate":
-                    st.text_input("Full Name")
-                    st.text_input("Email")
-                    st.button("Register as Candidate")
+                # 'key' መጨመሩ መረጃው እንዳይጠፋ ይረዳል
+                adm_key = st.text_input("Admin Access Key", type="password", key="admin_key_input")
+                email_input = st.text_input("Recruiter Email", key="rec_email_input")
                 
-                else: # RECRUITER LOGIC (Fixed)
-                    if st.session_state["verification_step"] == "select_role":
-                        st.subheader("Step 1: Admin Verification")
-                        admin_key = st.text_input("Admin Access Key", type="password")
-                        rec_email = st.text_input("Recruiter Email")
+                if st.button("Verify & Send Code"):
+                    if adm_key != ADMIN_SECRET_KEY:
+                        st.error("Incorrect Admin Key!")
+                    elif not validate_email(email_input):
+                        st.error("Invalid Email Address!")
+                    else:
+                        code = generate_access_code()
+                        success, msg = send_access_code_email(email_input, code)
                         
-                        if st.button("Verify & Send Code"):
-                            if admin_key != ADMIN_SECRET_KEY:
-                                st.error("Incorrect Admin Key!")
-                            elif not validate_email(rec_email):
-                                st.error("Invalid Email!")
-                            else:
-                                code = generate_access_code()
-                                success, msg = send_access_code_email(rec_email, code)
-                                if success:
-                                    # Save code to DB
-                                    conn = get_sqlite_connection()
-                                    conn.execute("INSERT OR REPLACE INTO invitation_codes VALUES (?, ?, ?)", (rec_email, code, datetime.now()))
-                                    conn.commit(); conn.close()
-                                    
-                                    st.session_state["verification_email"] = rec_email
-                                    st.session_state["verification_step"] = "verify_code"
-                                    st.success("Code sent to email!")
-                                    st.rerun()
-                                else:
-                                    st.error(f"Email Error: {msg}")
-
-                    elif st.session_state["verification_step"] == "verify_code":
-                        st.subheader("Step 2: Enter Code")
-                        st.info(f"Code sent to {st.session_state['verification_email']}")
-                        v_code = st.text_input("6-Digit Code")
-                        
-                        if st.button("Complete Registration"):
-                            # Logic to check code in DB
-                            st.success("Verified! Final registration form would appear here.")
-                        
-                        if st.button("Back"):
-                            st.session_state["verification_step"] = "select_role"
+                        if success:
+                            # ዳታቤዝ ውስጥ ኮዱን ማስቀመጥ
+                            conn = get_sqlite_connection()
+                            conn.execute("INSERT OR REPLACE INTO invitation_codes VALUES (?, ?, ?)", 
+                                         (email_input, code, datetime.now()))
+                            conn.commit()
+                            conn.close()
+                            
+                            # ወደ ሚቀጥለው ደረጃ መሸጋገር
+                            st.session_state["verification_email"] = email_input
+                            st.session_state["verification_step"] = "verify_code"
+                            st.success(f"Code sent to {email_input}")
                             st.rerun()
+                        else:
+                            st.error(f"Failed to send email: {msg}")
 
-    else:
-        st.write("Logged in content here.")
+            # --- STEP 2: ENTER CODE ---
+            elif st.session_state["verification_step"] == "verify_code":
+                st.subheader("Step 2: Enter Code")
+                st.info(f"Verification code sent to: **{st.session_state['verification_email']}**")
+                
+                v_code = st.text_input("6-Digit Code", key="v_code_input")
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("Complete Registration"):
+                        # ኮዱን ከዳታቤዝ ጋር ማረጋገጥ
+                        conn = get_sqlite_connection()
+                        cursor = conn.cursor()
+                        cursor.execute("SELECT code FROM invitation_codes WHERE email=?", (st.session_state["verification_email"],))
+                        result = cursor.fetchone()
+                        conn.close()
+                        
+                        if result and v_code == result[0]:
+                            st.success("✅ Verification Successful! Welcome Recruiter.")
+                            # እዚህ ጋር የተጠቃሚውን ሙሉ መረጃ መቀበያ ፎርም ማሳየት ትችላለህ
+                        else:
+                            st.error("Invalid Code. Please check your email again.")
+                
+                with col2:
+                    if st.button("Back"):
+                        st.session_state["verification_step"] = "select_role"
+                        st.rerun()
+
+        else:
+            st.subheader("Candidate Registration")
+            st.text_input("Full Name", key="cand_name")
+            st.text_input("Email", key="cand_email")
+            st.button("Register")
 
 if __name__ == "__main__":
     main()
