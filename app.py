@@ -1,6 +1,6 @@
 import streamlit as st
-import mysql.connector
-from mysql.connector import Error
+import sqlite3
+from sqlite3 import Error
 import pandas as pd
 import plotly.express as px
 from datetime import datetime
@@ -155,83 +155,51 @@ except (KeyError, StreamlitSecretNotFoundError):
     SMTP_PORT = int(os.environ.get("SMTP_PORT", 587))
 
 
-# --- MySQL Database Functions ---
-def get_mysql_connection():
-    """Establish a connection to the MySQL database."""
+# --- SQLite Database Functions ---
+def get_sqlite_connection():
+    """Establish a connection to the SQLite database."""
     try:
-        # First try to connect to the database
-        connection = mysql.connector.connect(
-            host='localhost',
-            user='root',
-            password='',
-            database='resume_system'
-        )
+        connection = sqlite3.connect('resume_system.db')
         return connection
     except Error as e:
-        if e.errno == 1049:  # Unknown database
-            # Database doesn't exist, create it
-            try:
-                connection = mysql.connector.connect(
-                    host='localhost',
-                    user='root',
-                    password=''
-                )
-                cursor = connection.cursor()
-                cursor.execute("CREATE DATABASE resume_system")
-                connection.commit()
-                cursor.close()
-                connection.close()
-                
-                # Now connect to the newly created database
-                connection = mysql.connector.connect(
-                    host='localhost',
-                    user='root',
-                    password='',
-                    database='resume_system'
-                )
-                return connection
-            except Error as create_e:
-                st.error(f"Error creating database: {create_e}")
-                return None
-        else:
-            st.error(f"Error connecting to MySQL: {e}")
-            return None
+        st.error(f"Error connecting to SQLite: {e}")
+        return None
 
 def init_db():
-    """Initialize MySQL database and ensure tables exist."""
-    connection = get_mysql_connection()
+    """Initialize SQLite database and ensure tables exist."""
+    connection = get_sqlite_connection()
     if connection:
         cursor = connection.cursor()
         try:
             # Create users table if it doesn't exist
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS users (
-                    id INT AUTO_INCREMENT PRIMARY KEY,
-                    full_name VARCHAR(255) NOT NULL,
-                    email VARCHAR(255) UNIQUE NOT NULL,
-                    phone VARCHAR(20),
-                    password VARCHAR(255) NOT NULL,
-                    role ENUM('candidate', 'recruiter') NOT NULL
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    full_name TEXT NOT NULL,
+                    email TEXT UNIQUE NOT NULL,
+                    phone TEXT,
+                    password TEXT NOT NULL,
+                    role TEXT NOT NULL CHECK (role IN ('candidate', 'recruiter'))
                 )
             """)
             # Create all_submissions table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS all_submissions (
-                    id INT AUTO_INCREMENT PRIMARY KEY,
-                    full_name VARCHAR(255) NOT NULL,
-                    email VARCHAR(255) UNIQUE NOT NULL,
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    full_name TEXT NOT NULL,
+                    email TEXT UNIQUE NOT NULL,
                     resume_text TEXT,
-                    tf_idf_score FLOAT,
-                    transformer_score FLOAT,
-                    final_score FLOAT,
+                    tf_idf_score REAL,
+                    transformer_score REAL,
+                    final_score REAL,
                     upload_time DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             """)
             # Create invitation_codes table for recruiter pre-verification
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS invitation_codes (
-                    email VARCHAR(255) PRIMARY KEY,
-                    code VARCHAR(10) NOT NULL,
+                    email TEXT PRIMARY KEY,
+                    code TEXT NOT NULL,
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             """)
@@ -243,8 +211,8 @@ def init_db():
             connection.close()
 
 def load_submissions() -> pd.DataFrame:
-    """Load all submissions from the MySQL database as a Pandas DataFrame."""
-    connection = get_mysql_connection()
+    """Load all submissions from the SQLite database as a Pandas DataFrame."""
+    connection = get_sqlite_connection()
     if connection:
         try:
             df = pd.read_sql_query("SELECT full_name AS Name, email AS Email, resume_text AS Resume_Text, tf_idf_score, transformer_score, final_score, upload_time FROM all_submissions", connection)
@@ -257,21 +225,14 @@ def load_submissions() -> pd.DataFrame:
     return pd.DataFrame()
 
 def save_submission(name: str, email: str, resume_text: str, tf_idf_score: float = None, transformer_score: float = None, final_score: float = None):
-    """Save a new submission to the MySQL database."""
-    connection = get_mysql_connection()
+    """Save a new submission to the SQLite database."""
+    connection = get_sqlite_connection()
     if connection:
         cursor = connection.cursor()
         try:
             cursor.execute("""
-                INSERT INTO all_submissions (full_name, email, resume_text, tf_idf_score, transformer_score, final_score, upload_time)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
-                ON DUPLICATE KEY UPDATE
-                    full_name = VALUES(full_name),
-                    resume_text = VALUES(resume_text),
-                    tf_idf_score = VALUES(tf_idf_score),
-                    transformer_score = VALUES(transformer_score),
-                    final_score = VALUES(final_score),
-                    upload_time = VALUES(upload_time)
+                INSERT OR REPLACE INTO all_submissions (full_name, email, resume_text, tf_idf_score, transformer_score, final_score, upload_time)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
             """, (name, email, resume_text, tf_idf_score, transformer_score, final_score, datetime.now()))
             connection.commit()
         except Error as e:
@@ -282,11 +243,11 @@ def save_submission(name: str, email: str, resume_text: str, tf_idf_score: float
 
 def find_submission_by_email(email: str) -> bool:
     """Return True if a submission exists in the database for the provided email."""
-    connection = get_mysql_connection()
+    connection = get_sqlite_connection()
     if connection:
         cursor = connection.cursor()
         try:
-            cursor.execute("SELECT 1 FROM all_submissions WHERE email = %s LIMIT 1", (email,))
+            cursor.execute("SELECT 1 FROM all_submissions WHERE email = ? LIMIT 1", (email,))
             result = cursor.fetchone()
             return result is not None
         except Error as e:
@@ -307,16 +268,14 @@ def generate_access_code():
 
 def save_invitation_code(email: str, code: str):
     """Save or update invitation code in the database."""
-    connection = get_mysql_connection()
+    connection = get_sqlite_connection()
     if connection:
         cursor = connection.cursor()
         try:
-            # Use INSERT ... ON DUPLICATE KEY UPDATE to handle existing emails
+            # Use INSERT OR REPLACE to handle existing emails
             cursor.execute("""
-                INSERT INTO invitation_codes (email, code, created_at)
-                VALUES (%s, %s, %s)
-                ON DUPLICATE KEY UPDATE
-                code = VALUES(code), created_at = VALUES(created_at)
+                INSERT OR REPLACE INTO invitation_codes (email, code, created_at)
+                VALUES (?, ?, ?)
             """, (email, code, datetime.now()))
             connection.commit()
             return True
@@ -331,13 +290,13 @@ def save_invitation_code(email: str, code: str):
 
 def verify_invitation_code(email: str, code: str) -> bool:
     """Verify if the entered code matches the stored code for the email."""
-    connection = get_mysql_connection()
+    connection = get_sqlite_connection()
     if connection:
         cursor = connection.cursor()
         try:
             cursor.execute("""
                 SELECT code FROM invitation_codes
-                WHERE email = %s AND created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
+                WHERE email = ? AND created_at >= datetime('now', '-24 hours')
             """, (email,))
             result = cursor.fetchone()
             if result and result[0] == code:
@@ -403,23 +362,22 @@ def register_user(name: str, email: str, phone: str, password: str, role: str):
     if not validate_email(email):
         return False, "Invalid email address."
 
-    connection = get_mysql_connection()
+    connection = get_sqlite_connection()
     if not connection:
         return False, "Database connection failed."
 
     cursor = connection.cursor()
     try:
         cursor.execute(
-            "INSERT INTO users (full_name, email, phone, password, role) VALUES (%s, %s, %s, %s, %s)",
+            "INSERT INTO users (full_name, email, phone, password, role) VALUES (?, ?, ?, ?, ?)",
             (name, email.lower().strip(), phone, hash_password(password.strip()), role),
         )
         connection.commit()
         return True, "Registration successful!"
+    except sqlite3.IntegrityError:
+        return False, "Email already registered."
     except Error as e:
-        if e.errno == 1062:  # Duplicate entry
-            return False, "Email already registered."
-        else:
-            return False, f"Registration failed: {str(e)}"
+        return False, f"Registration failed: {str(e)}"
     finally:
         cursor.close()
         connection.close()
@@ -427,13 +385,13 @@ def register_user(name: str, email: str, phone: str, password: str, role: str):
 
 def login_user(email: str, password: str) -> dict or None:
     """Login user and return user info if successful."""
-    connection = get_mysql_connection()
+    connection = get_sqlite_connection()
     if not connection:
         return None
 
     cursor = connection.cursor()
     try:
-        cursor.execute("SELECT full_name, email, phone, role FROM users WHERE email = %s AND password = %s",
+        cursor.execute("SELECT full_name, email, phone, role FROM users WHERE email = ? AND password = ?",
                       (email.lower().strip(), hash_password(password.strip())))
         result = cursor.fetchone()
         if result:
@@ -927,6 +885,22 @@ def main():
         if st.sidebar.button("Logout"):
             st.session_state["user"] = None
             st.rerun()
+
+        # About text below logout button
+        st.sidebar.markdown("---")
+        if user["role"] == "recruiter":
+            st.sidebar.markdown(
+                "**About**\n\n"
+                "Recruiter dashboard: Create job descriptions, compute resume rankings, and shortlist top candidates efficiently. "
+                "Use the system to compare applicant profiles, track matching scores, and speed up hiring decisions."
+            )
+        else:
+            st.sidebar.markdown(
+                "**About**\n\n"
+                "Candidate dashboard: View your resume submission status and see how your profile aligns with the selected role. "
+                "This system helps candidates understand hiring criteria and keep track of application progress."
+            )
+
 
     st.markdown('</div>', unsafe_allow_html=True)
     # Footer
